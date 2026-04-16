@@ -700,6 +700,37 @@ const LSP::DocumentSymbol *GDScriptWorkspace::resolve_symbol(const LSP::TextDocu
 					}
 				}
 			}
+
+			// If cursor is on a variable declaration that shadows a parent variable, navigate to the parent.
+			if (symbol != nullptr && symbol->selectionRange.contains(p_doc_pos.position)) {
+				const GDScriptParser::ClassNode *cls = parser->get_tree();
+				if (cls && cls->has_member(symbol_identifier)) {
+					const GDScriptParser::ClassNode::Member &cur_member = cls->get_member(symbol_identifier);
+					if (cur_member.type == GDScriptParser::ClassNode::Member::VARIABLE) {
+						const GDScriptParser::DataType *base = &cls->base_type;
+						while (base && base->kind == GDScriptParser::DataType::CLASS && base->class_type) {
+							if (base->class_type->has_member(symbol_identifier)) {
+								const GDScriptParser::ClassNode::Member &parent_member = base->class_type->get_member(symbol_identifier);
+								if (parent_member.type == GDScriptParser::ClassNode::Member::VARIABLE) {
+									String parent_path = base->class_type->get_datatype().script_path;
+									if (parent_path.is_empty()) {
+										parent_path = path;
+									}
+									const ExtendGDScriptParser *parent_parser = GDScriptLanguageProtocol::get_singleton()->get_parse_result(parent_path);
+									if (parent_parser) {
+										const LSP::DocumentSymbol *parent_symbol = parent_parser->get_symbol_defined_at_line(LINE_NUMBER_TO_INDEX(parent_member.variable->start_line), symbol_identifier);
+										if (parent_symbol) {
+											symbol = parent_symbol;
+										}
+									}
+								}
+								break;
+							}
+							base = &base->class_type->base_type;
+						}
+					}
+				}
+			}
 		}
 	}
 
