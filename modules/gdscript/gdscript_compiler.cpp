@@ -2905,10 +2905,20 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 				minfo.property_info = prop_info;
 
 				if (variable->is_static) {
-					minfo.index = p_script->static_variables_indices.size();
+					if (p_script->static_variables_indices.has(name)) {
+						// Use same slot as shadowed variable.
+						minfo.index = p_script->static_variables_indices[name].index;
+					} else {
+						minfo.index = p_script->static_variables_indices.size();
+					}
 					p_script->static_variables_indices[name] = minfo;
 				} else {
-					minfo.index = p_script->member_indices.size();
+					if (p_script->member_indices.has(name)) {
+						// Use same slot as shadowed variable.
+						minfo.index = p_script->member_indices[name].index;
+					} else {
+						minfo.index = p_script->member_indices.size();
+					}
 					p_script->member_indices[name] = minfo;
 					p_script->members.insert(name);
 				}

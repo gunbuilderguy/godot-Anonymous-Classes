@@ -294,6 +294,20 @@ Error GDScriptAnalyzer::check_class_member_name_conflict(const GDScriptParser::C
 	while (current_data_type && current_data_type->kind == GDScriptParser::DataType::Kind::CLASS) {
 		GDScriptParser::ClassNode *current_class_node = current_data_type->class_type;
 		if (has_member_name_conflict_in_script_class(p_member_name, current_class_node, p_member_node)) {
+			const GDScriptParser::ClassNode::Member &parent_member = current_class_node->get_member(p_member_name);
+
+			// Allow variable to shadow parent variable.
+			if (p_member_node->type == GDScriptParser::Node::VARIABLE && parent_member.type == GDScriptParser::ClassNode::Member::VARIABLE) {
+				String parent_class_name = current_class_node->get_global_name();
+				if (parent_class_name.is_empty()) {
+					parent_class_name = current_class_node->fqcn;
+				}
+#ifdef DEBUG_ENABLED
+				parser->push_warning(p_member_node, GDScriptWarning::SHADOWED_MEMBER_BASE_CLASS, "variable", p_member_name, parent_member.get_type_name(), itos(parent_member.get_line()), parent_class_name);
+#endif
+				return OK;
+			}
+
 			String parent_class_name = current_class_node->fqcn;
 			if (current_class_node->identifier != nullptr) {
 				parent_class_name = current_class_node->identifier->name;
