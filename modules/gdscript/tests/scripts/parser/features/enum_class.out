@@ -1,0 +1,15 @@
+GDTEST_OK
+rgb(255, 0, 0)
+???
+RED -> rgb(255, 0, 0)
+GREEN -> rgb(0, 255, 0)
+BLUE -> rgb(0, 0, 255)
+MYSTERY -> ???
+2
+BLUE
+Hue.RED
+got: Hue.MYSTERY
+true
+false
+true
+<null>

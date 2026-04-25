@@ -69,6 +69,9 @@ String GDScriptWarning::get_message() const {
 				return vformat(R"(The local %s "%s" is shadowing an already-declared %s at line %s in the base class "%s".)", symbols[0], symbols[1], symbols[2], symbols[3], symbols[4]);
 			}
 			return vformat(R"(The local %s "%s" is shadowing an already-declared %s in the base class "%s".)", symbols[0], symbols[1], symbols[2], symbols[3]);
+		case SHADOWED_MEMBER_BASE_CLASS:
+			CHECK_SYMBOLS(5);
+			return vformat(R"(The %s "%s" is shadowing an already-declared %s at line %s in the base class "%s".)", symbols[0], symbols[1], symbols[2], symbols[3], symbols[4]);
 		case SHADOWED_GLOBAL_IDENTIFIER:
 			CHECK_SYMBOLS(3);
 			return vformat(R"(The %s "%s" has the same name as a %s.)", symbols[0], symbols[1], symbols[2]);
@@ -212,6 +215,7 @@ String GDScriptWarning::get_name_from_code(Code p_code) {
 		PNAME("UNUSED_SIGNAL"),
 		PNAME("SHADOWED_VARIABLE"),
 		PNAME("SHADOWED_VARIABLE_BASE_CLASS"),
+		PNAME("SHADOWED_MEMBER_BASE_CLASS"),
 		PNAME("SHADOWED_GLOBAL_IDENTIFIER"),
 		PNAME("UNREACHABLE_CODE"),
 		PNAME("UNREACHABLE_PATTERN"),

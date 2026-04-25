@@ -296,6 +296,7 @@ class EditorHelpBit : public VBoxContainer {
 		String description;
 		String deprecated_message;
 		String experimental_message;
+		String header_suffix;
 		DocType doc_type;
 		String value;
 		Vector<ArgumentData> arguments;
@@ -351,13 +352,13 @@ protected:
 public:
 	static String get_as_plain_text(const String &p_symbol, const String &p_prologue = String());
 
-	void parse_symbol(const String &p_symbol, const String &p_prologue = String());
+	void parse_symbol(const String &p_symbol, const String &p_prologue = String(), const String &p_header_suffix = String());
 	void set_custom_text(const String &p_type, const String &p_name, const String &p_description);
 
 	void set_content_height_limits(float p_min, float p_max);
 	void update_content_height();
 
-	EditorHelpBit(const String &p_symbol = String(), const String &p_prologue = String(), bool p_use_class_prefix = false, bool p_allow_selection = true, bool p_in_tooltip = false);
+	EditorHelpBit(const String &p_symbol = String(), const String &p_prologue = String(), bool p_use_class_prefix = false, bool p_allow_selection = true, bool p_in_tooltip = false, const String &p_header_suffix = String());
 };
 
 // Standard tooltips do not allow you to hover over them.
@@ -383,7 +384,7 @@ protected:
 
 public:
 	// The returned control is an orphan node, which is to make the standard tooltip invisible.
-	[[nodiscard]] static Control *make_tooltip(Control *p_target, const String &p_symbol, const String &p_prologue = String(), bool p_use_class_prefix = false, bool p_shortcut = false);
+	[[nodiscard]] static Control *make_tooltip(Control *p_target, const String &p_symbol, const String &p_prologue = String(), bool p_use_class_prefix = false, bool p_shortcut = false, const String &p_header_suffix = String());
 
 	void popup_under_position(const Point2 &p_point);
 

@@ -284,6 +284,50 @@ void ExtendGDScriptParser::parse_class_symbol(const GDScriptParser::ClassNode *p
 				}
 
 				symbol.documentation = m.variable->doc_data.description;
+
+				// Annotate shadowed variables with parent class info.
+				{
+					const GDScriptParser::DataType *base = &p_class->base_type;
+					while (base) {
+						if (base->kind == GDScriptParser::DataType::CLASS && base->class_type) {
+							if (base->class_type->has_member(m.variable->identifier->name)) {
+								const ClassNode::Member &parent_m = base->class_type->get_member(m.variable->identifier->name);
+								if (parent_m.type == ClassNode::Member::VARIABLE) {
+									String base_name = base->class_type->get_global_name();
+									if (base_name.is_empty()) {
+										base_name = base->class_type->fqcn;
+									}
+									symbol.documentation += vformat("\n\nShadows `%s` from `%s` (line %d).", m.variable->identifier->name, base_name, parent_m.variable->start_line);
+								}
+								break;
+							}
+							base = &base->class_type->base_type;
+						} else if (!base->script_path.is_empty()) {
+							// Check external script for shadowed member.
+							const ExtendGDScriptParser *base_parser = GDScriptLanguageProtocol::get_singleton()->get_parse_result(base->script_path);
+							if (base_parser) {
+								const GDScriptParser::ClassNode *base_cls = base_parser->get_tree();
+								if (base_cls && base_cls->has_member(m.variable->identifier->name)) {
+									const ClassNode::Member &parent_m = base_cls->get_member(m.variable->identifier->name);
+									if (parent_m.type == ClassNode::Member::VARIABLE) {
+										symbol.documentation += vformat("\n\nShadows `%s` from `%s` (line %d).", m.variable->identifier->name, base->script_path.get_file(), parent_m.variable->start_line);
+									}
+									break;
+								}
+								if (base_cls) {
+									base = &base_cls->base_type;
+								} else {
+									break;
+								}
+							} else {
+								break;
+							}
+						} else {
+							break;
+						}
+					}
+				}
+
 				symbol.uri = uri;
 				symbol.script_path = path;
 

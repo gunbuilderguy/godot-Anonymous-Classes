@@ -1,0 +1,4 @@
+GDTEST_OK
+~~ WARNING at line 8: (SHADOWED_MEMBER_BASE_CLASS) The variable "speed" is shadowing an already-declared variable at line 2 in the base class "Base".
+speed=5.0
+speed=10.0

@@ -634,6 +634,25 @@ void GDScriptWorkspace::completion(const LSP::CompletionParams &p_params, List<S
 	}
 }
 
+// Find the ClassNode that directly owns a member variable with the given name at the given line.
+static const GDScriptParser::ClassNode *find_class_owning_member(const GDScriptParser::ClassNode *p_class, const StringName &p_name, int p_line) {
+	if (p_class->has_member(p_name)) {
+		const GDScriptParser::ClassNode::Member &m = p_class->get_member(p_name);
+		if (m.type == GDScriptParser::ClassNode::Member::VARIABLE && m.variable->start_line == p_line) {
+			return p_class;
+		}
+	}
+	for (int i = 0; i < p_class->members.size(); i++) {
+		if (p_class->members[i].type == GDScriptParser::ClassNode::Member::CLASS) {
+			const GDScriptParser::ClassNode *result = find_class_owning_member(p_class->members[i].m_class, p_name, p_line);
+			if (result) {
+				return result;
+			}
+		}
+	}
+	return nullptr;
+}
+
 const LSP::DocumentSymbol *GDScriptWorkspace::resolve_symbol(const LSP::TextDocumentPositionParams &p_doc_pos, const String &p_symbol_name, bool p_func_required) {
 	const LSP::DocumentSymbol *symbol = nullptr;
 
@@ -697,6 +716,63 @@ const LSP::DocumentSymbol *GDScriptWorkspace::resolve_symbol(const LSP::TextDocu
 					symbol = get_local_symbol_at(parser, symbol_identifier, p_doc_pos.position);
 					if (!symbol) {
 						symbol = parser->get_member_symbol(symbol_identifier);
+					}
+				}
+			}
+
+			// If cursor is on a variable declaration that shadows a parent variable, navigate to the parent.
+			if (symbol != nullptr && symbol->selectionRange.contains(p_doc_pos.position)) {
+				// LSP lines are 0-based, parser lines are 1-based.
+				const GDScriptParser::ClassNode *cls = find_class_owning_member(parser->get_tree(), symbol_identifier, p_doc_pos.position.line + 1);
+				if (cls) {
+					const GDScriptParser::DataType *base = &cls->base_type;
+					while (base) {
+						if (base->kind == GDScriptParser::DataType::CLASS && base->class_type) {
+							if (base->class_type->has_member(symbol_identifier)) {
+								const GDScriptParser::ClassNode::Member &parent_member = base->class_type->get_member(symbol_identifier);
+								if (parent_member.type == GDScriptParser::ClassNode::Member::VARIABLE) {
+									String parent_path = base->class_type->get_datatype().script_path;
+									if (parent_path.is_empty()) {
+										parent_path = path;
+									}
+									const ExtendGDScriptParser *parent_parser = GDScriptLanguageProtocol::get_singleton()->get_parse_result(parent_path);
+									if (parent_parser) {
+										const LSP::DocumentSymbol *parent_symbol = parent_parser->get_symbol_defined_at_line(LINE_NUMBER_TO_INDEX(parent_member.variable->start_line), symbol_identifier);
+										if (parent_symbol) {
+											symbol = parent_symbol;
+										}
+									}
+								}
+								break;
+							}
+							base = &base->class_type->base_type;
+						} else if (!base->script_path.is_empty()) {
+							// External script base.
+							const ExtendGDScriptParser *base_parser = GDScriptLanguageProtocol::get_singleton()->get_parse_result(base->script_path);
+							if (base_parser) {
+								const GDScriptParser::ClassNode *base_cls = base_parser->get_tree();
+								if (base_cls && base_cls->has_member(symbol_identifier)) {
+									const GDScriptParser::ClassNode::Member &parent_member = base_cls->get_member(symbol_identifier);
+									if (parent_member.type == GDScriptParser::ClassNode::Member::VARIABLE) {
+										const LSP::DocumentSymbol *parent_symbol = base_parser->get_symbol_defined_at_line(LINE_NUMBER_TO_INDEX(parent_member.variable->start_line), symbol_identifier);
+										if (parent_symbol) {
+											symbol = parent_symbol;
+										}
+									}
+									break;
+								}
+								// Continue walking the chain.
+								if (base_cls) {
+									base = &base_cls->base_type;
+								} else {
+									break;
+								}
+							} else {
+								break;
+							}
+						} else {
+							break;
+						}
 					}
 				}
 			}

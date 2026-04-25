@@ -1,0 +1,2 @@
+GDTEST_ANALYZER_ERROR
+>> ERROR at line 7: Cannot construct enum class "Stage" directly; use one of its declared values.

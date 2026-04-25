@@ -1601,6 +1601,11 @@ GDScriptParser::SignalNode *GDScriptParser::parse_signal(bool p_is_static) {
 }
 
 GDScriptParser::EnumNode *GDScriptParser::parse_enum(bool p_is_static) {
+	// Java-style enum class: `enum class Name:` with values that carry state.
+	if (match(GDScriptTokenizer::Token::CLASS)) {
+		return parse_enum_class(p_is_static);
+	}
+
 	EnumNode *enum_node = alloc_node<EnumNode>();
 	bool named = false;
 
@@ -1698,6 +1703,351 @@ GDScriptParser::EnumNode *GDScriptParser::parse_enum(bool p_is_static) {
 	end_statement("enum");
 
 	return enum_node;
+}
+
+GDScriptParser::IdentifierNode *GDScriptParser::make_synth_identifier(const StringName &p_name) {
+	IdentifierNode *id = alloc_node<IdentifierNode>();
+	id->name = p_name;
+	complete_extents(id);
+	return id;
+}
+
+GDScriptParser::TypeNode *GDScriptParser::make_synth_type(const StringName &p_name) {
+	TypeNode *t = alloc_node<TypeNode>();
+	t->type_chain.push_back(make_synth_identifier(p_name));
+	complete_extents(t);
+	return t;
+}
+
+GDScriptParser::TypeNode *GDScriptParser::make_synth_array_type(const StringName &p_element_name) {
+	TypeNode *t = alloc_node<TypeNode>();
+	t->type_chain.push_back(make_synth_identifier(SNAME("Array")));
+	t->container_types.push_back(make_synth_type(p_element_name));
+	complete_extents(t);
+	return t;
+}
+
+GDScriptParser::SubscriptNode *GDScriptParser::make_synth_attribute(ExpressionNode *p_base, const StringName &p_attribute) {
+	SubscriptNode *sub = alloc_node<SubscriptNode>();
+	sub->base = p_base;
+	sub->is_attribute = true;
+	sub->attribute = make_synth_identifier(p_attribute);
+	complete_extents(sub);
+	return sub;
+}
+
+GDScriptParser::FunctionNode *GDScriptParser::make_enum_to_string_method(const StringName &p_enum_name) {
+	// `return "EnumName." + names[values.find(self)]`.
+	LiteralNode *prefix = alloc_node<LiteralNode>();
+	prefix->value = String(p_enum_name) + ".";
+	complete_extents(prefix);
+
+	SelfNode *self_ref = alloc_node<SelfNode>();
+	self_ref->current_class = current_class;
+	complete_extents(self_ref);
+
+	// values.find(self)
+	SubscriptNode *find_attr = make_synth_attribute(make_synth_identifier(SNAME("values")), SNAME("find"));
+	CallNode *find_call = alloc_node<CallNode>();
+	find_call->callee = find_attr;
+	find_call->function_name = SNAME("find");
+	find_call->arguments.push_back(self_ref);
+	complete_extents(find_call);
+
+	// names[<find_call>]
+	SubscriptNode *index = alloc_node<SubscriptNode>();
+	index->base = make_synth_identifier(SNAME("names"));
+	index->is_attribute = false;
+	index->index = find_call;
+	complete_extents(index);
+
+	// "EnumName." + names[...]
+	BinaryOpNode *concat = alloc_node<BinaryOpNode>();
+	concat->operation = BinaryOpNode::OP_ADDITION;
+	concat->variant_op = Variant::OP_ADD;
+	concat->left_operand = prefix;
+	concat->right_operand = index;
+	complete_extents(concat);
+
+	ReturnNode *ret = alloc_node<ReturnNode>();
+	ret->return_value = concat;
+	complete_extents(ret);
+
+	SuiteNode *body = alloc_node<SuiteNode>();
+	body->statements.push_back(ret);
+	body->has_return = true; // Normally set during parsing; we're emitting the return synthetically.
+	complete_extents(body);
+
+	FunctionNode *func = alloc_node<FunctionNode>();
+	func->identifier = make_synth_identifier(SNAME("_to_string"));
+	func->return_type = make_synth_type(SNAME("String"));
+	func->body = body;
+	func->is_static = false;
+	complete_extents(func);
+
+	return func;
+}
+
+GDScriptParser::FunctionNode *GDScriptParser::make_enum_value_of_method(const StringName &p_enum_name) {
+	// Parameter: `p_name: String`.
+	ParameterNode *param = alloc_node<ParameterNode>();
+	param->identifier = make_synth_identifier(SNAME("p_name"));
+	param->datatype_specifier = make_synth_type(SNAME("String"));
+	complete_extents(param);
+
+	auto make_find_call = [&]() -> CallNode * {
+		IdentifierNode *arg = make_synth_identifier(SNAME("p_name"));
+		// Pre-resolve the parameter reference so the analyzer doesn't try to look it up by name.
+		arg->source = IdentifierNode::FUNCTION_PARAMETER;
+		arg->parameter_source = param;
+		param->usages++;
+		SubscriptNode *find_attr = make_synth_attribute(make_synth_identifier(SNAME("names")), SNAME("find"));
+		CallNode *call = alloc_node<CallNode>();
+		call->callee = find_attr;
+		call->function_name = SNAME("find");
+		call->arguments.push_back(arg);
+		complete_extents(call);
+		return call;
+	};
+
+	// `names.find(p_name) >= 0`.
+	LiteralNode *zero = alloc_node<LiteralNode>();
+	zero->value = 0;
+	complete_extents(zero);
+
+	BinaryOpNode *cond = alloc_node<BinaryOpNode>();
+	cond->operation = BinaryOpNode::OP_COMP_GREATER_EQUAL;
+	cond->variant_op = Variant::OP_GREATER_EQUAL;
+	cond->left_operand = make_find_call();
+	cond->right_operand = zero;
+	complete_extents(cond);
+
+	// `values[names.find(p_name)]`.
+	SubscriptNode *index_expr = alloc_node<SubscriptNode>();
+	index_expr->base = make_synth_identifier(SNAME("values"));
+	index_expr->is_attribute = false;
+	index_expr->index = make_find_call();
+	complete_extents(index_expr);
+
+	// `null`.
+	LiteralNode *null_lit = alloc_node<LiteralNode>();
+	null_lit->value = Variant();
+	complete_extents(null_lit);
+
+	// Ternary: `values[...] if cond else null`.
+	TernaryOpNode *tern = alloc_node<TernaryOpNode>();
+	tern->condition = cond;
+	tern->true_expr = index_expr;
+	tern->false_expr = null_lit;
+	complete_extents(tern);
+
+	ReturnNode *ret = alloc_node<ReturnNode>();
+	ret->return_value = tern;
+	complete_extents(ret);
+
+	SuiteNode *body = alloc_node<SuiteNode>();
+	body->statements.push_back(ret);
+	body->has_return = true;
+	complete_extents(body);
+
+	FunctionNode *func = alloc_node<FunctionNode>();
+	func->identifier = make_synth_identifier(SNAME("valueOf"));
+	func->parameters.push_back(param);
+	func->parameters_indices[param->identifier->name] = 0;
+	func->return_type = make_synth_type(p_enum_name);
+	func->body = body;
+	func->is_static = true;
+	body->parent_function = func;
+	body->add_local(param, func); // Register the parameter so identifier resolution finds it.
+	complete_extents(func);
+
+	return func;
+}
+
+GDScriptParser::EnumNode *GDScriptParser::parse_enum_class(bool p_is_static) {
+	// Parses `enum class Name:` with values that may carry constructor args,
+	// plus an optional class body (fields, methods). Desugars each value into
+	// a `static var NAME = EnumName.new(args)` member of the synthetic class.
+	ClassNode *n_class = alloc_node<ClassNode>();
+	n_class->is_enum_class = true;
+
+	ClassNode *previous_class = current_class;
+	current_class = n_class;
+	n_class->outer = previous_class;
+
+	if (consume(GDScriptTokenizer::Token::IDENTIFIER, R"(Expected identifier for the enum class name.)")) {
+		n_class->identifier = parse_identifier();
+		if (n_class->outer) {
+			String fqcn = n_class->outer->fqcn;
+			if (fqcn.is_empty()) {
+				fqcn = GDScript::canonicalize_path(script_path);
+			}
+			n_class->fqcn = fqcn + "::" + n_class->identifier->name;
+		} else {
+			n_class->fqcn = n_class->identifier->name;
+		}
+	}
+
+	consume(GDScriptTokenizer::Token::COLON, R"(Expected ":" after enum class name.)");
+	if (!consume(GDScriptTokenizer::Token::NEWLINE, R"(Expected newline after ":".)")) {
+		current_class = previous_class;
+		complete_extents(n_class);
+		return nullptr;
+	}
+	if (!consume(GDScriptTokenizer::Token::INDENT, R"(Expected indented block after enum class declaration.)")) {
+		current_class = previous_class;
+		complete_extents(n_class);
+		return nullptr;
+	}
+
+	const StringName enum_name = n_class->identifier ? n_class->identifier->name : StringName();
+
+	// Parse enum values first (identifiers, possibly with args). Stop at the
+	// first keyword-started class member or at DEDENT.
+	Vector<StringName> value_names;
+	while (!is_at_end() && check(GDScriptTokenizer::Token::IDENTIFIER)) {
+		advance();
+		IdentifierNode *value_id = parse_identifier();
+		int value_line = previous.start_line;
+
+		// Build `EnumName.new(args)` as the initializer for this value.
+		IdentifierNode *enum_ref = alloc_node<IdentifierNode>();
+		enum_ref->name = n_class->identifier ? n_class->identifier->name : StringName();
+		complete_extents(enum_ref);
+
+		IdentifierNode *new_id = alloc_node<IdentifierNode>();
+		new_id->name = SNAME("new");
+		complete_extents(new_id);
+
+		SubscriptNode *callee = alloc_node<SubscriptNode>();
+		callee->base = enum_ref;
+		callee->is_attribute = true;
+		callee->attribute = new_id;
+		complete_extents(callee);
+
+		CallNode *call = alloc_node<CallNode>();
+		call->callee = callee;
+		call->function_name = SNAME("new");
+		call->is_enum_class_internal = true;
+
+		if (match(GDScriptTokenizer::Token::PARENTHESIS_OPEN)) {
+			push_multiline(true);
+			if (!check(GDScriptTokenizer::Token::PARENTHESIS_CLOSE)) {
+				do {
+					if (check(GDScriptTokenizer::Token::PARENTHESIS_CLOSE)) {
+						break;
+					}
+					ExpressionNode *arg = parse_expression(false);
+					if (arg != nullptr) {
+						call->arguments.push_back(arg);
+					}
+				} while (match(GDScriptTokenizer::Token::COMMA));
+			}
+			pop_multiline();
+			consume(GDScriptTokenizer::Token::PARENTHESIS_CLOSE, R"*(Expected ")" after enum value arguments.)*");
+		}
+		complete_extents(call);
+
+		// Per-value override body: `VALUE(args): func ...` reuses the anonymous-class machinery.
+		try_parse_anonymous_class_body(call);
+
+		VariableNode *var = alloc_node<VariableNode>();
+		var->identifier = value_id;
+		var->is_static = true;
+		var->is_final = true;
+		var->initializer = call;
+		var->datatype_specifier = make_synth_type(enum_name);
+		var->export_info.name = value_id->name;
+		var->assignments = 1;
+		complete_extents(var);
+
+		if (n_class->members_indices.has(value_id->name)) {
+			push_error(vformat(R"(Enum value "%s" is already declared in this enum class.)", value_id->name), value_id);
+		} else {
+			n_class->add_member(var);
+			n_class->has_static_data = true;
+			value_names.push_back(value_id->name);
+		}
+
+		end_statement("enum value");
+	}
+
+	// `static var values: Array[EnumName] = [VAL1, VAL2, ...]`.
+	if (!value_names.is_empty() && !n_class->members_indices.has(SNAME("values"))) {
+		ArrayNode *arr = alloc_node<ArrayNode>();
+		for (const StringName &name : value_names) {
+			arr->elements.push_back(make_synth_identifier(name));
+		}
+		complete_extents(arr);
+
+		VariableNode *values_var = alloc_node<VariableNode>();
+		values_var->identifier = make_synth_identifier(SNAME("values"));
+		values_var->is_static = true;
+		values_var->is_final = true;
+		values_var->initializer = arr;
+		values_var->datatype_specifier = make_synth_array_type(enum_name);
+		values_var->export_info.name = values_var->identifier->name;
+		values_var->assignments = 1;
+		complete_extents(values_var);
+
+		n_class->add_member(values_var);
+	}
+
+	// `static var names: Array[String] = ["VAL1", "VAL2", ...]`.
+	if (!value_names.is_empty() && !n_class->members_indices.has(SNAME("names"))) {
+		ArrayNode *names_arr = alloc_node<ArrayNode>();
+		for (const StringName &name : value_names) {
+			LiteralNode *lit = alloc_node<LiteralNode>();
+			lit->value = String(name);
+			complete_extents(lit);
+			names_arr->elements.push_back(lit);
+		}
+		complete_extents(names_arr);
+
+		VariableNode *names_var = alloc_node<VariableNode>();
+		names_var->identifier = make_synth_identifier(SNAME("names"));
+		names_var->is_static = true;
+		names_var->is_final = true;
+		names_var->initializer = names_arr;
+		names_var->datatype_specifier = make_synth_array_type(SNAME("String"));
+		names_var->export_info.name = names_var->identifier->name;
+		names_var->assignments = 1;
+		complete_extents(names_var);
+
+		n_class->add_member(names_var);
+	}
+
+	// Default `func _to_string() -> String: ...` so prints show `EnumName.VALUE` rather than
+	// `<RefCounted#...>`. Skipped if the user supplied their own.
+	if (!value_names.is_empty() && !n_class->members_indices.has(SNAME("_to_string"))) {
+		FunctionNode *to_str = make_enum_to_string_method(enum_name);
+		n_class->add_member(to_str);
+	}
+
+	// Default `static func valueOf(p_name) -> EnumName` for reverse name -> value lookup.
+	if (!value_names.is_empty() && !n_class->members_indices.has(SNAME("valueOf"))) {
+		FunctionNode *vof = make_enum_value_of_method(enum_name);
+		n_class->add_member(vof);
+	}
+
+	// Remaining content of the indented block is the regular class body.
+	parse_class_body(true);
+	complete_extents(n_class);
+
+	consume(GDScriptTokenizer::Token::DEDENT, R"(Missing unindent at the end of the enum class body.)");
+
+	current_class = previous_class;
+
+	if (current_class) {
+		if (n_class->identifier != nullptr && current_class->members_indices.has(n_class->identifier->name)) {
+			push_error(vformat(R"(Name "%s" is already used in this class.)", n_class->identifier->name), n_class->identifier);
+		} else {
+			current_class->add_member(n_class);
+		}
+	}
+
+	// Return nullptr so the generic parse_class_member wrapper doesn't try to add an EnumNode as a member.
+	return nullptr;
 }
 
 bool GDScriptParser::parse_function_signature(FunctionNode *p_function, SuiteNode *p_body, const String &p_type, int p_signature_start) {
@@ -2338,7 +2688,9 @@ GDScriptParser::ForNode *GDScriptParser::parse_for() {
 		consume(GDScriptTokenizer::Token::TK_IN, R"(Expected "in" after "for" variable type specifier.)");
 	}
 
+	outer_colon_reserved = true;
 	n_for->list = parse_expression(false);
+	outer_colon_reserved = false;
 
 	if (!n_for->list) {
 		push_error(R"(Expected iterable after "in".)");
@@ -2376,7 +2728,9 @@ GDScriptParser::ForNode *GDScriptParser::parse_for() {
 GDScriptParser::IfNode *GDScriptParser::parse_if(const String &p_token) {
 	IfNode *n_if = alloc_node<IfNode>();
 
+	outer_colon_reserved = true;
 	n_if->condition = parse_expression(false);
+	outer_colon_reserved = false;
 	if (n_if->condition == nullptr) {
 		push_error(vformat(R"(Expected conditional expression after "%s".)", p_token));
 	}
@@ -2423,7 +2777,9 @@ GDScriptParser::IfNode *GDScriptParser::parse_if(const String &p_token) {
 GDScriptParser::MatchNode *GDScriptParser::parse_match() {
 	MatchNode *match_node = alloc_node<MatchNode>();
 
+	outer_colon_reserved = true;
 	match_node->test = parse_expression(false);
+	outer_colon_reserved = false;
 	if (match_node->test == nullptr) {
 		push_error(R"(Expected expression to test after "match".)");
 	}
@@ -2734,7 +3090,9 @@ GDScriptParser::IdentifierNode *GDScriptParser::PatternNode::get_bind(const Stri
 GDScriptParser::WhileNode *GDScriptParser::parse_while() {
 	WhileNode *n_while = alloc_node<WhileNode>();
 
+	outer_colon_reserved = true;
 	n_while->condition = parse_expression(false);
+	outer_colon_reserved = false;
 	if (n_while->condition == nullptr) {
 		push_error(R"(Expected conditional expression after "while".)");
 	}
@@ -3269,6 +3627,10 @@ GDScriptParser::ExpressionNode *GDScriptParser::parse_await(ExpressionNode *p_pr
 GDScriptParser::ExpressionNode *GDScriptParser::parse_array(ExpressionNode *p_previous_operand, bool p_can_assign) {
 	ArrayNode *array = alloc_node<ArrayNode>();
 
+	// Brackets create a new expression scope; outer ":" reservation does not apply inside.
+	bool previous_colon_reserved = outer_colon_reserved;
+	outer_colon_reserved = false;
+
 	if (!check(GDScriptTokenizer::Token::BRACKET_CLOSE)) {
 		do {
 			if (check(GDScriptTokenizer::Token::BRACKET_CLOSE)) {
@@ -3288,11 +3650,15 @@ GDScriptParser::ExpressionNode *GDScriptParser::parse_array(ExpressionNode *p_pr
 	consume(GDScriptTokenizer::Token::BRACKET_CLOSE, R"(Expected closing "]" after array elements.)");
 	complete_extents(array);
 
+	outer_colon_reserved = previous_colon_reserved;
 	return array;
 }
 
 GDScriptParser::ExpressionNode *GDScriptParser::parse_dictionary(ExpressionNode *p_previous_operand, bool p_can_assign) {
 	DictionaryNode *dictionary = alloc_node<DictionaryNode>();
+
+	// Braces create a new expression scope for values; keys reserve ":" for the entry separator.
+	bool previous_colon_reserved = outer_colon_reserved;
 
 	bool decided_style = false;
 	if (!check(GDScriptTokenizer::Token::BRACE_CLOSE)) {
@@ -3302,8 +3668,10 @@ GDScriptParser::ExpressionNode *GDScriptParser::parse_dictionary(ExpressionNode 
 				break;
 			}
 
-			// Key.
+			// Key. The ":" belongs to the dictionary entry, not to a `.new():` anonymous class body.
+			outer_colon_reserved = true;
 			ExpressionNode *key = parse_expression(false, true); // Stop on "=" so we can check for Lua table style.
+			outer_colon_reserved = false;
 
 			if (key == nullptr) {
 				push_error(R"(Expected expression as dictionary key.)");
@@ -3391,11 +3759,16 @@ GDScriptParser::ExpressionNode *GDScriptParser::parse_dictionary(ExpressionNode 
 	consume(GDScriptTokenizer::Token::BRACE_CLOSE, R"(Expected closing "}" after dictionary elements.)");
 	complete_extents(dictionary);
 
+	outer_colon_reserved = previous_colon_reserved;
 	return dictionary;
 }
 
 GDScriptParser::ExpressionNode *GDScriptParser::parse_grouping(ExpressionNode *p_previous_operand, bool p_can_assign) {
+	// Parens create a new expression scope, so any outer ":" reservation does not apply inside.
+	bool previous_colon_reserved = outer_colon_reserved;
+	outer_colon_reserved = false;
 	ExpressionNode *grouped = parse_expression(false);
+	outer_colon_reserved = previous_colon_reserved;
 	pop_multiline();
 	if (grouped == nullptr) {
 		push_error(R"(Expected grouping expression.)");
@@ -3450,7 +3823,11 @@ GDScriptParser::ExpressionNode *GDScriptParser::parse_subscript(ExpressionNode *
 	make_completion_context(COMPLETION_SUBSCRIPT, subscript);
 
 	subscript->base = p_previous_operand;
+	// Brackets create a new expression scope; outer ":" reservation does not apply inside.
+	bool previous_colon_reserved = outer_colon_reserved;
+	outer_colon_reserved = false;
 	subscript->index = parse_expression(false);
+	outer_colon_reserved = previous_colon_reserved;
 
 #ifdef TOOLS_ENABLED
 	if (subscript->index != nullptr && subscript->index->type == Node::LITERAL) {
@@ -3555,13 +3932,15 @@ GDScriptParser::ExpressionNode *GDScriptParser::parse_call(ExpressionNode *p_pre
 		}
 	}
 
-	// Arguments.
+	// Arguments. Parens create a new expression scope; outer ":" reservation does not apply inside.
 	CompletionType ct = COMPLETION_CALL_ARGUMENTS;
 	if (call->function_name == SNAME("load")) {
 		ct = COMPLETION_RESOURCE_PATH;
 	}
 	push_completion_call(call);
 	int argument_index = 0;
+	bool previous_colon_reserved = outer_colon_reserved;
+	outer_colon_reserved = false;
 	do {
 		make_completion_context(ct, call, argument_index);
 		set_last_completion_call_arg(argument_index);
@@ -3584,12 +3963,176 @@ GDScriptParser::ExpressionNode *GDScriptParser::parse_call(ExpressionNode *p_pre
 		argument_index++;
 	} while (match(GDScriptTokenizer::Token::COMMA));
 	pop_completion_call();
+	outer_colon_reserved = previous_colon_reserved;
 
 	pop_multiline();
 	consume(GDScriptTokenizer::Token::PARENTHESIS_CLOSE, R"*(Expected closing ")" after call arguments.)*");
 	complete_extents(call);
 
+	// Anonymous class body after .new() call.
+	// Skip when the surrounding statement owns the colon (e.g., `for i in Thing.new():`).
+	try_parse_anonymous_class_body(call);
+
 	return call;
+}
+
+void GDScriptParser::try_parse_anonymous_class_body(CallNode *p_call) {
+	if (outer_colon_reserved || !check(GDScriptTokenizer::Token::COLON)) {
+		return;
+	}
+	if (p_call->function_name != SNAME("new") || p_call->callee == nullptr || p_call->callee->type != Node::SUBSCRIPT) {
+		return;
+	}
+	SubscriptNode *callee_subscript = static_cast<SubscriptNode *>(p_call->callee);
+	if (!callee_subscript->is_attribute) {
+		return;
+	}
+
+	// Collect the base class identifier chain from the callee.
+	Vector<IdentifierNode *> base_chain;
+	ExpressionNode *base_expr = callee_subscript->base;
+	String base_class_name;
+	String base_preload_path;
+
+	// preload("path.gd").new(): — extract the literal path as the base.
+	if (base_expr != nullptr && base_expr->type == Node::PRELOAD) {
+		PreloadNode *pl = static_cast<PreloadNode *>(base_expr);
+		if (pl->path != nullptr && pl->path->type == Node::LITERAL) {
+			LiteralNode *lit = static_cast<LiteralNode *>(pl->path);
+			if (lit->value.get_type() == Variant::STRING) {
+				base_preload_path = String(lit->value);
+				base_class_name = base_preload_path.get_file().get_basename();
+			}
+		}
+	} else {
+		while (base_expr != nullptr) {
+			if (base_expr->type == Node::IDENTIFIER) {
+				base_chain.insert(0, static_cast<IdentifierNode *>(base_expr));
+				base_class_name = static_cast<IdentifierNode *>(base_expr)->name.operator String();
+				break;
+			} else if (base_expr->type == Node::SUBSCRIPT) {
+				SubscriptNode *sub = static_cast<SubscriptNode *>(base_expr);
+				if (sub->is_attribute && sub->attribute) {
+					base_chain.insert(0, sub->attribute);
+					if (base_class_name.is_empty()) {
+						base_class_name = sub->attribute->name.operator String();
+					}
+				}
+				base_expr = sub->base;
+			} else {
+				break;
+			}
+		}
+	}
+
+	if (base_chain.is_empty() && base_preload_path.is_empty()) {
+		return;
+	}
+
+	ClassNode *n_class = alloc_node<ClassNode>();
+	ClassNode *previous_class = current_class;
+
+	String anon_name = vformat("@AnonymousClass_%s_%d", base_class_name, anonymous_class_count++);
+	IdentifierNode *class_id = alloc_node<IdentifierNode>();
+	complete_extents(class_id);
+	class_id->name = StringName(anon_name);
+	n_class->identifier = class_id;
+
+	n_class->outer = current_class;
+	if (current_class) {
+		String fqcn = current_class->fqcn;
+		if (fqcn.is_empty()) {
+			fqcn = GDScript::canonicalize_path(script_path);
+		}
+		n_class->fqcn = fqcn + "::" + anon_name;
+	} else {
+		n_class->fqcn = anon_name;
+	}
+
+	n_class->extends_used = true;
+	if (!base_preload_path.is_empty()) {
+		n_class->extends_path = base_preload_path;
+	} else {
+		for (int i = 0; i < base_chain.size(); i++) {
+			IdentifierNode *extend_id = alloc_node<IdentifierNode>();
+			complete_extents(extend_id);
+			extend_id->name = base_chain[i]->name;
+			n_class->extends.push_back(extend_id);
+		}
+	}
+
+	// Reset multiline state for the class body.
+	bool multiline_context = multiline_stack.back()->get();
+	push_multiline(false);
+	if (multiline_context) {
+		tokenizer->push_expression_indented_block();
+	}
+
+	current_class = n_class;
+
+	advance(); // Consume COLON.
+	bool multiline_body = match(GDScriptTokenizer::Token::NEWLINE);
+	if (multiline_body) {
+		if (!consume(GDScriptTokenizer::Token::INDENT, R"(Expected indented block after anonymous class declaration.)")) {
+			current_class = previous_class;
+			pop_multiline();
+			if (multiline_context) {
+				tokenizer->pop_expression_indented_block();
+			}
+			complete_extents(n_class);
+			return;
+		}
+	}
+
+	if (check(GDScriptTokenizer::Token::EXTENDS)) {
+		push_error(R"*(Cannot use "extends" inside an anonymous class body; the base class is inferred from the ".new()" call.)*");
+	}
+
+	if (multiline_body) {
+		parse_class_body(true);
+	} else {
+		// Inline body: only a single "func" definition is allowed. `in_lambda` lets
+		// the function body terminate on any non-statement-end token (e.g., `)`).
+		if (check(GDScriptTokenizer::Token::FUNC)) {
+			bool previous_in_lambda = in_lambda;
+			in_lambda = true;
+			parse_class_member(&GDScriptParser::parse_function, AnnotationInfo::FUNCTION, "function", false);
+			in_lambda = previous_in_lambda;
+		} else {
+			push_error(R"*(Inline anonymous class body must be a single "func" definition; use an indented block for multiple members.)*");
+		}
+	}
+	complete_extents(n_class);
+
+	if (n_class->members.is_empty()) {
+		push_error(R"*(Anonymous class body is empty; omit the ":" to instantiate the base class directly.)*");
+	}
+
+	if (multiline_body) {
+		consume(GDScriptTokenizer::Token::DEDENT, R"(Missing unindent at the end of the anonymous class body.)");
+	}
+
+	pop_multiline();
+	if (multiline_context) {
+		while (check(GDScriptTokenizer::Token::DEDENT) || check(GDScriptTokenizer::Token::INDENT) || check(GDScriptTokenizer::Token::NEWLINE)) {
+			current = tokenizer->scan();
+		}
+		tokenizer->pop_expression_indented_block();
+	}
+
+	current_class = previous_class;
+
+	if (current_class) {
+		current_class->add_member(n_class);
+	}
+
+	// Rewrite the call to target the anonymous class.
+	IdentifierNode *anon_ref = alloc_node<IdentifierNode>();
+	complete_extents(anon_ref);
+	anon_ref->name = StringName(anon_name);
+	callee_subscript->base = anon_ref;
+
+	lambda_ended = true;
 }
 
 GDScriptParser::ExpressionNode *GDScriptParser::parse_get_node(ExpressionNode *p_previous_operand, bool p_can_assign) {

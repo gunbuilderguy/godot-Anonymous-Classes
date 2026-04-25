@@ -2576,6 +2576,10 @@ static void _add_text_to_rt(const String &p_bbcode, RichTextLabel *p_rt, const C
 				p_rt->pop(); // color
 				p_rt->add_text(nbsp);
 				p_rt->add_image(p_owner_node->get_editor_theme_icon(SNAME("ExternalLink")), 0, doc_font_size, link_color);
+			} else if (tag == "/ilink") {
+				p_rt->pop(); // meta
+				p_rt->pop(); // color
+				p_rt->pop(); // font
 			} else {
 				p_rt->pop();
 			}
@@ -2867,6 +2871,15 @@ static void _add_text_to_rt(const String &p_bbcode, RichTextLabel *p_rt, const C
 
 			pos = brk_end + 1;
 			tag_stack.push_front("url");
+		} else if (tag.begins_with("ilink=")) {
+			// Internal link, styled like a type reference, no external-link icon on close.
+			// Font size is inherited so links match the surrounding text size.
+			const String url = tag.substr(6);
+			p_rt->push_font(doc_code_font);
+			p_rt->push_color(type_color);
+			p_rt->push_meta(url, RichTextLabel::META_UNDERLINE_ON_HOVER);
+			pos = brk_end + 1;
+			tag_stack.push_front("ilink");
 		} else if (tag.begins_with("img")) {
 			int width = 0;
 			int height = 0;
@@ -4131,6 +4144,16 @@ void EditorHelpBit::_update_labels() {
 			} break;
 		}
 
+		if (!help_data.header_suffix.is_empty()) {
+			const Color comment_color = get_theme_color(SNAME("comment_color"), SNAME("EditorHelp"));
+			title->add_newline();
+			title->push_font(doc_source);
+			title->push_font_size(doc_source_size * 0.9);
+			_add_text_to_rt(help_data.header_suffix.replace("<EditorHelpBitCommentColor>", comment_color.to_html()), title, this, symbol_class_name);
+			title->pop(); // font_size
+			title->pop(); // font
+		}
+
 		title->show();
 	} else {
 		title->hide();
@@ -4347,6 +4370,18 @@ void EditorHelpBit::_meta_clicked(const String &p_select) {
 			_go_to_help(topic + ":" + link.left(class_end) + ":" + link.substr(class_end + 1));
 		} else {
 			_go_to_help(topic + ":" + symbol_class_name + ":" + link);
+		}
+	} else if (p_select.begins_with("goto-line:")) {
+		// Format: `goto-line:<script_path>|<line>`.
+		const String payload = p_select.trim_prefix("goto-line:");
+		const int sep = payload.rfind_char('|');
+		if (sep > 0) {
+			const String script_path = payload.left(sep);
+			const int line = payload.substr(sep + 1).to_int();
+			Ref<Resource> res = ResourceLoader::load(script_path);
+			if (res.is_valid() && ScriptEditor::get_singleton()) {
+				ScriptEditor::get_singleton()->edit(res, line - 1, 0);
+			}
 		}
 	} else if (p_select.begins_with("open-file:")) {
 		String path = ProjectSettings::get_singleton()->globalize_path(p_select.trim_prefix("open-file:"));
@@ -4618,7 +4653,7 @@ String EditorHelpBit::get_as_plain_text(const String &p_symbol, const String &p_
 	return output.as_string();
 }
 
-void EditorHelpBit::parse_symbol(const String &p_symbol, const String &p_prologue) {
+void EditorHelpBit::parse_symbol(const String &p_symbol, const String &p_prologue, const String &p_header_suffix) {
 	const PackedStringArray slices = p_symbol.split("|", true, 3);
 	ERR_FAIL_COND_MSG(slices.size() < 3, R"(Invalid doc id: The expected format is "item_type|class_name|item_name[|item_data]".)");
 
@@ -4789,6 +4824,8 @@ void EditorHelpBit::parse_symbol(const String &p_symbol, const String &p_prologu
 		}
 	}
 
+	help_data.header_suffix = p_header_suffix;
+
 	if (help_data.description.is_empty() && item_type != "resource") {
 		help_data.description = "[color=<EditorHelpBitCommentColor>][i]" + TTR("No description available.") + "[/i][/color]";
 	}
@@ -4832,7 +4869,7 @@ void EditorHelpBit::update_content_height() {
 	content->set_custom_minimum_size(Size2(content->get_custom_minimum_size().x, CLAMP(content_height, content_min_height, content_max_height)));
 }
 
-EditorHelpBit::EditorHelpBit(const String &p_symbol, const String &p_prologue, bool p_use_class_prefix, bool p_allow_selection, bool p_in_tooltip) {
+EditorHelpBit::EditorHelpBit(const String &p_symbol, const String &p_prologue, bool p_use_class_prefix, bool p_allow_selection, bool p_in_tooltip, const String &p_header_suffix) {
 	add_theme_constant_override("separation", 0);
 
 	title = memnew(RichTextLabel);
@@ -4863,7 +4900,7 @@ EditorHelpBit::EditorHelpBit(const String &p_symbol, const String &p_prologue, b
 	use_class_prefix = p_use_class_prefix;
 
 	if (!p_symbol.is_empty()) {
-		parse_symbol(p_symbol, p_prologue);
+		parse_symbol(p_symbol, p_prologue, p_header_suffix);
 	} else if (!p_prologue.is_empty()) {
 		set_custom_text(String(), String(), p_prologue);
 	}
@@ -4958,7 +4995,7 @@ void EditorHelpBitTooltip::_notification(int p_what) {
 	}
 }
 
-Control *EditorHelpBitTooltip::make_tooltip(Control *p_target, const String &p_symbol, const String &p_prologue, bool p_use_class_prefix, bool p_shortcut) {
+Control *EditorHelpBitTooltip::make_tooltip(Control *p_target, const String &p_symbol, const String &p_prologue, bool p_use_class_prefix, bool p_shortcut, const String &p_header_suffix) {
 	ERR_FAIL_NULL_V(p_target, _make_invisible_control());
 
 	// Show the custom tooltip only if it is not already visible.
@@ -4968,7 +5005,7 @@ Control *EditorHelpBitTooltip::make_tooltip(Control *p_target, const String &p_s
 		return _make_invisible_control();
 	}
 
-	EditorHelpBit *help_bit = memnew(EditorHelpBit(p_symbol, p_prologue, p_use_class_prefix, false, true));
+	EditorHelpBit *help_bit = memnew(EditorHelpBit(p_symbol, p_prologue, p_use_class_prefix, false, true, p_header_suffix));
 
 	EditorHelpBitTooltip *tooltip = memnew(EditorHelpBitTooltip(p_target, p_shortcut));
 	help_bit->connect("request_hide", callable_mp(static_cast<Node *>(tooltip), &Node::queue_free));

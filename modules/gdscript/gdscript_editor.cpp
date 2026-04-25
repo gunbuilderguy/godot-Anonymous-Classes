@@ -4483,6 +4483,21 @@ static Error _lookup_symbol_from_base(const GDScriptParser::DataType &p_base, co
 			}
 
 			if (_lookup_symbol_from_base(base_type, p_symbol, r_result) == OK) {
+				// On a declaration that shadows a parent member, store shadowing info and redirect to parent.
+				if (context.type == GDScriptParser::COMPLETION_DECLARATION && context.current_class) {
+					ScriptLanguage::LookupResult parent_result;
+					if (_lookup_symbol_from_base(context.current_class->base_type, p_symbol, parent_result) == OK) {
+						String shadow_note;
+						if (!parent_result.script_path.is_empty() && parent_result.location > 0) {
+							const String goto_url = vformat("goto-line:%s|%d", parent_result.script_path, parent_result.location);
+							shadow_note = vformat("[b]Shadows[/b] [ilink=%s]%s[/ilink] from [ilink=#%s]%s[/ilink], [ilink=%s][color=<EditorHelpBitCommentColor>](line %d)[/color][/ilink].", goto_url, p_symbol, parent_result.class_name, parent_result.class_name, goto_url, parent_result.location);
+						} else {
+							shadow_note = vformat("[b]Shadows[/b] [code]%s[/code] from [ilink=#%s]%s[/ilink].", p_symbol, parent_result.class_name, parent_result.class_name);
+						}
+						r_result = parent_result;
+						r_result.description = shadow_note;
+					}
+				}
 				return OK;
 			}
 

@@ -510,6 +510,7 @@ public:
 		StringName function_name;
 		bool is_super = false;
 		bool is_static = false;
+		bool is_enum_class_internal = false; // Synthetic `.new()` emitted for an enum class value — bypasses the external-construction ban.
 
 		CallNode() {
 			type = CALL;
@@ -755,6 +756,7 @@ public:
 		bool extends_used = false;
 		bool onready_used = false;
 		bool is_abstract = false;
+		bool is_enum_class = false; // `enum class Name:` — no external `.new()` allowed.
 		bool has_static_data = false;
 		bool annotated_static_unload = false;
 		String extends_path;
@@ -1273,6 +1275,7 @@ public:
 		PropertyInfo export_info;
 		int assignments = 0;
 		bool is_static = false;
+		bool is_final = false; // Cannot be reassigned after initialization (e.g., enum class values).
 #ifdef TOOLS_ENABLED
 		MemberDocData doc_data;
 #endif // TOOLS_ENABLED
@@ -1399,6 +1402,8 @@ private:
 	FunctionNode *current_function = nullptr;
 	LambdaNode *current_lambda = nullptr;
 	SuiteNode *current_suite = nullptr;
+	int anonymous_class_count = 0;
+	bool outer_colon_reserved = false; // Outer context owns the ":" (for/while/if/match headers, dictionary keys), so `.new():` must not eat it.
 
 	CompletionContext completion_context;
 	List<CompletionCall> completion_call_stack;
@@ -1548,6 +1553,20 @@ private:
 	void parse_class_member(T *(GDScriptParser::*p_parse_function)(bool), AnnotationInfo::TargetKind p_target, const String &p_member_kind, bool p_is_static = false);
 	SignalNode *parse_signal(bool p_is_static);
 	EnumNode *parse_enum(bool p_is_static);
+	// Java-style enum class: builds a ClassNode and registers it on current_class, returns nullptr.
+	EnumNode *parse_enum_class(bool p_is_static);
+	// Turns a `Base.new(args):body` call into a call on a synthetic anonymous subclass.
+	// Called at the end of parse_call, and reused by parse_enum_class for per-value overrides.
+	void try_parse_anonymous_class_body(CallNode *p_call);
+	// AST-construction helpers used by parse_enum_class for synthetic members.
+	IdentifierNode *make_synth_identifier(const StringName &p_name);
+	TypeNode *make_synth_type(const StringName &p_name);
+	TypeNode *make_synth_array_type(const StringName &p_element_name);
+	SubscriptNode *make_synth_attribute(ExpressionNode *p_base, const StringName &p_attribute);
+	// Builds `func _to_string() -> String: return "EnumName." + names[values.find(self)]`.
+	FunctionNode *make_enum_to_string_method(const StringName &p_enum_name);
+	// Builds `static func valueOf(p_name: String) -> EnumName: return values[names.find(p_name)] if names.find(p_name) >= 0 else null`.
+	FunctionNode *make_enum_value_of_method(const StringName &p_enum_name);
 	ParameterNode *parse_parameter();
 	FunctionNode *parse_function(bool p_is_static);
 	bool parse_function_signature(FunctionNode *p_function, SuiteNode *p_body, const String &p_type, int p_signature_start);

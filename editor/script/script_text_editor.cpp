@@ -1460,8 +1460,14 @@ void ScriptTextEditor::_show_symbol_tooltip(const String &p_symbol, int p_row, i
 		debug_value = TTR("Current value: ") + debug_value.replace("[", "[lb]");
 	}
 
-	if (!doc_symbol.is_empty() || !debug_value.is_empty()) {
-		Control *tmp = EditorHelpBitTooltip::make_tooltip(code_editor->get_text_editor(), doc_symbol, debug_value, true, p_shortcut);
+	// Shadowing info appended to the tooltip header.
+	String header_suffix;
+	if (lc_error == OK && !result.description.is_empty()) {
+		header_suffix = result.description;
+	}
+
+	if (!doc_symbol.is_empty() || !debug_value.is_empty() || !header_suffix.is_empty()) {
+		Control *tmp = EditorHelpBitTooltip::make_tooltip(code_editor->get_text_editor(), doc_symbol, debug_value, true, p_shortcut, header_suffix);
 		memdelete(tmp);
 	}
 }

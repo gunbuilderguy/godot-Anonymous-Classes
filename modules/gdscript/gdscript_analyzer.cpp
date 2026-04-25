@@ -294,6 +294,24 @@ Error GDScriptAnalyzer::check_class_member_name_conflict(const GDScriptParser::C
 	while (current_data_type && current_data_type->kind == GDScriptParser::DataType::Kind::CLASS) {
 		GDScriptParser::ClassNode *current_class_node = current_data_type->class_type;
 		if (has_member_name_conflict_in_script_class(p_member_name, current_class_node, p_member_node)) {
+			const GDScriptParser::ClassNode::Member &parent_member = current_class_node->get_member(p_member_name);
+
+			// Allow variable to shadow parent variable.
+			if (p_member_node->type == GDScriptParser::Node::VARIABLE && parent_member.type == GDScriptParser::ClassNode::Member::VARIABLE) {
+				// Prefer the global class_name; otherwise fall back to the local identifier (cleaner than the full fqcn).
+				String parent_class_name = current_class_node->get_global_name();
+				if (parent_class_name.is_empty() && current_class_node->identifier != nullptr) {
+					parent_class_name = current_class_node->identifier->name;
+				}
+				if (parent_class_name.is_empty()) {
+					parent_class_name = current_class_node->fqcn;
+				}
+#ifdef DEBUG_ENABLED
+				parser->push_warning(p_member_node, GDScriptWarning::SHADOWED_MEMBER_BASE_CLASS, "variable", p_member_name, parent_member.get_type_name(), itos(parent_member.get_line()), parent_class_name);
+#endif
+				return OK;
+			}
+
 			String parent_class_name = current_class_node->fqcn;
 			if (current_class_node->identifier != nullptr) {
 				parent_class_name = current_class_node->identifier->name;
@@ -2918,7 +2936,27 @@ void GDScriptAnalyzer::reduce_assignment(GDScriptParser::AssignmentNode *p_assig
 	if (assignee_type.is_constant) {
 		push_error("Cannot assign a new value to a constant.", p_assignment->assignee);
 		return;
-	} else if (p_assignment->assignee->type == GDScriptParser::Node::SUBSCRIPT && static_cast<GDScriptParser::SubscriptNode *>(p_assignment->assignee)->base->is_constant) {
+	}
+
+	// Reject assignment to `final` variables (e.g., enum class values and metadata arrays).
+	{
+		GDScriptParser::ExpressionNode *target = p_assignment->assignee;
+		if (target->type == GDScriptParser::Node::SUBSCRIPT) {
+			GDScriptParser::SubscriptNode *sub = static_cast<GDScriptParser::SubscriptNode *>(target);
+			if (sub->is_attribute && sub->attribute) {
+				target = sub->attribute;
+			}
+		}
+		if (target->type == GDScriptParser::Node::IDENTIFIER) {
+			GDScriptParser::IdentifierNode *id = static_cast<GDScriptParser::IdentifierNode *>(target);
+			if ((id->source == GDScriptParser::IdentifierNode::STATIC_VARIABLE || id->source == GDScriptParser::IdentifierNode::MEMBER_VARIABLE) && id->variable_source != nullptr && id->variable_source->is_final) {
+				push_error(vformat(R"(Cannot assign to "%s": it is declared final.)", id->name), p_assignment->assignee);
+				return;
+			}
+		}
+	}
+
+	if (p_assignment->assignee->type == GDScriptParser::Node::SUBSCRIPT && static_cast<GDScriptParser::SubscriptNode *>(p_assignment->assignee)->base->is_constant) {
 		const GDScriptParser::DataType &base_type = static_cast<GDScriptParser::SubscriptNode *>(p_assignment->assignee)->base->datatype;
 		if (base_type.kind != GDScriptParser::DataType::SCRIPT && base_type.kind != GDScriptParser::DataType::CLASS) { // Static variables.
 			push_error("Cannot assign a new value to a constant.", p_assignment->assignee);
@@ -3615,6 +3653,9 @@ void GDScriptAnalyzer::reduce_call(GDScriptParser::CallNode *p_call, bool p_is_a
 		}
 		if ((base_type.kind == GDScriptParser::DataType::CLASS && base_type.class_type->is_abstract) || (base_type.kind == GDScriptParser::DataType::SCRIPT && base_type.script_type.is_valid() && base_type.script_type->is_abstract())) {
 			push_error(vformat(R"(Cannot construct abstract class "%s".)", base_type.to_string()), p_call);
+		}
+		if (base_type.kind == GDScriptParser::DataType::CLASS && base_type.class_type->is_enum_class && !p_call->is_enum_class_internal) {
+			push_error(vformat(R"(Cannot construct enum class "%s" directly; use one of its declared values.)", base_type.to_string()), p_call);
 		}
 	}
 
